@@ -1269,8 +1269,10 @@ pub(crate) fn copy2d(
 fn reduce_source(op: &str) -> String {
     let (init, combine) = match op {
         "sum" => ("0.0", "acc + v"),
-        "max" => ("-1.0 / 0.0", "v > acc ? v : acc"),
-        _ => ("1.0 / 0.0", "v < acc ? v : acc"),
+        // naga 는 `±1.0 / 0.0` 을 무한대 리터럴로 보고 셰이더 파싱을 거부합니다("Float literal is infinite").
+        // 유한한 float 최댓값 근처의 값을 항등원으로 씁니다. 유한한 입력에서 결과는 같습니다.
+        "max" => ("-3.0e38", "v > acc ? v : acc"),
+        _ => ("3.0e38", "v < acc ? v : acc"),
     };
     format!(
         r#"#version 450
@@ -1626,7 +1628,7 @@ void main() {{
     for (uint row = gl_WorkGroupID.x; row < pc.rows; row += gl_NumWorkGroups.x) {{
         uint base = pc.off + row * pc.cols;
         uint obase = row * pc.cols;
-        float m = -1.0 / 0.0;
+        float m = -3.0e38; // finite identity instead of an infinite literal (see reduce_source)
         for (uint c = t; c < pc.cols; c += 256u) {{
             m = max(m, x[base + c]);
         }}

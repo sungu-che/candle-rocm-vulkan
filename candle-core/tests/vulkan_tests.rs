@@ -1177,3 +1177,44 @@ fn fixed_exec_modes_are_batch_invariant() -> Result<()> {
     );
     Ok(())
 }
+
+/// naga rejects `+-1.0 / 0.0` as an infinite float literal ("Float literal is infinite").
+/// While the softmax and reduce max/min shaders used that expression, the native kernels
+/// silently fell back to the CPU even with native kernels forced on (softmax returned `None`,
+/// the reductions were never dispatched). This checks that the shaders compile and run, and
+/// that the reductions still match the CPU.
+#[test]
+fn softmax_and_reduce_shaders_compile() -> Result<()> {
+    let _guard = MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dev = vulkan();
+    shaders::set_native_override(Some(true));
+    shaders::set_native_thresholds(Some(0), Some(0));
+    let res = (|| -> Result<()> {
+        let cpu = randn(&[8, 300], DType::F32)?;
+        let x = cpu.to_device(&dev)?;
+
+        let gpu_softmax = {
+            let (s, layout) = x.storage_and_layout();
+            match &*s {
+                candle_core::Storage::Vulkan(v) => v.softmax_last_dim(layout)?,
+                _ => panic!("expected a Vulkan tensor"),
+            }
+        };
+        assert!(gpu_softmax.is_some(), "softmax shader fell back to the CPU");
+
+        let start = shaders::native_exec_count();
+        let max = x.max(1)?;
+        let min = x.min(1)?;
+        assert_eq!(
+            shaders::native_exec_count() - start,
+            2,
+            "reduce max and min should each run a native kernel"
+        );
+        assert_close(&max, &cpu.max(1)?, "reduce max")?;
+        assert_close(&min, &cpu.min(1)?, "reduce min")?;
+        Ok(())
+    })();
+    shaders::set_native_override(None);
+    shaders::set_native_thresholds(None, None);
+    res
+}
