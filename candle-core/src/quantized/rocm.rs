@@ -11,6 +11,9 @@ use std::ffi::c_void;
 
 /// Inputs with at most this many rows use the fused dequantize + mat-vec kernel.
 const QMV_MAX_ROWS: usize = 8;
+/// Q8_0 inputs with at most this many rows use `qmm_q8_0_*`. On gfx1032 it beats dequantize + gemm up
+/// to 20 rows (239 ms against 360 ms for a 32-layer model); from 24 rows the kernel takes 1.6 s.
+const QMM_MAX_ROWS: usize = 20;
 /// Upper bound for the temporary f32 weight tile used by the dequantize + gemm path.
 const MAX_DEQUANT_TILE_BYTES: usize = 128 << 20;
 
@@ -211,7 +214,13 @@ impl QRocmStorage {
         let rows = src_shape.elem_count() / k;
         let out = self.device.alloc(rows * n * 4)?;
         if rows > 0 && n > 0 {
-            if rows <= QMV_MAX_ROWS {
+            if rows <= QMM_MAX_ROWS && self.dtype == GgmlDType::Q8_0 {
+                // Reads each weight row once for all the input rows.
+                let name = format!("qmm_q8_0_{rows}");
+                let mut args = LaunchArgs::new();
+                args.ptr(self.data.as_ptr()).ptr(x_ptr).ptr(out.as_ptr()).usize(k).usize(n);
+                self.device.launch_1d(Module::Quantized, &name, n, &mut args)?;
+            } else if rows <= QMV_MAX_ROWS {
                 let name = format!("qmv_{}", type_suffix(self.dtype));
                 let func = self.device.get_func(Module::Quantized, &name)?;
                 let block = k.next_power_of_two().clamp(32, 256) as u32;

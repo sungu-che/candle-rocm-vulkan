@@ -247,6 +247,36 @@ DEVFN void qmv_impl(const uint8_t *w, const float *x, float *y, const size_t nco
     }
 }
 
+// Q8_0 weights times R input rows. Each work item computes one output element for all the rows,
+// so a weight row is read once whatever R is, and a block scale once per block. No barriers.
+template <int R>
+DEVFN void qmm_q8_0_impl(const uint8_t *w, const float *x, float *y, const size_t ncols, const size_t nrows) {
+    const size_t blocks = ncols / DqQ8_0::QK;
+    const size_t row_bytes = blocks * DqQ8_0::BS;
+    for (size_t row = GS_START; row < nrows; row += GS_STEP) {
+        const uint8_t *b = w + row * row_bytes;
+        float acc[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) acc[r] = 0.0f;
+        for (size_t j = 0; j < blocks; j++, b += DqQ8_0::BS) {
+            const float scale = rd_f16(b);
+            const size_t col = j * DqQ8_0::QK;
+            float part[R];
+#pragma unroll
+            for (int r = 0; r < R; r++) part[r] = 0.0f;
+            for (int e = 0; e < DqQ8_0::QK; e++) {
+                const float v = (float)(int8_t)b[2 + e];
+#pragma unroll
+                for (int r = 0; r < R; r++) part[r] += v * x[r * ncols + col + e];
+            }
+#pragma unroll
+            for (int r = 0; r < R; r++) acc[r] += scale * part[r];
+        }
+#pragma unroll
+        for (int r = 0; r < R; r++) y[r * nrows + row] = acc[r];
+    }
+}
+
 template <typename D>
 DEVFN void qembed_impl(const uint8_t *w, const uint32_t *ids, float *out, const size_t n_ids, const size_t hidden,
                        const size_t rows) {
@@ -279,6 +309,29 @@ DEVFN void qembed_impl(const uint8_t *w, const uint32_t *ids, float *out, const 
         qembed_impl<D>(w, ids, out, n_ids, hidden, rows);                                                      \
     }                                                                                                          \
     CANDLE_REGISTER(qembed_##SFX)
+
+#define QMM_Q8_0(R)                                                                                                extern "C" __global__ void qmm_q8_0_##R(const uint8_t *w, const float *x, float *y, const size_t ncols,                                                const size_t nrows) {                                                      qmm_q8_0_impl<R>(w, x, y, ncols, nrows);                                                                   }                                                                                                              CANDLE_REGISTER(qmm_q8_0_##R)
+
+QMM_Q8_0(1)
+QMM_Q8_0(2)
+QMM_Q8_0(3)
+QMM_Q8_0(4)
+QMM_Q8_0(5)
+QMM_Q8_0(6)
+QMM_Q8_0(7)
+QMM_Q8_0(8)
+QMM_Q8_0(9)
+QMM_Q8_0(10)
+QMM_Q8_0(11)
+QMM_Q8_0(12)
+QMM_Q8_0(13)
+QMM_Q8_0(14)
+QMM_Q8_0(15)
+QMM_Q8_0(16)
+QMM_Q8_0(17)
+QMM_Q8_0(18)
+QMM_Q8_0(19)
+QMM_Q8_0(20)
 
 QUANT_FNS(DqF32, f32)
 QUANT_FNS(DqF16, f16)

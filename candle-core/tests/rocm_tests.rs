@@ -462,6 +462,39 @@ fn rand_seeded() -> Result<()> {
 }
 
 #[test]
+fn q8_0_matmul_matches_the_dequantized_weights_for_every_row_count() -> Result<()> {
+    let dev = rocm();
+    let (n, k) = (300, 320);
+    let w = randn(&[n, k], DType::F32)?;
+    let deq = QTensor::quantize(&w, GgmlDType::Q8_0)?.dequantize(&Device::Cpu)?;
+    let mm = QMatMul::from_qtensor(QTensor::quantize_onto(&w, GgmlDType::Q8_0, &dev)?)?;
+    // 1..=20 rows use qmm_q8_0_*, 21 and more dequantize + gemm.
+    let all = randn(&[22, k], DType::F32)?;
+    let single: Vec<Vec<f32>> = (0..4)
+        .map(|r| {
+            let row = all.narrow(0, r, 1)?.contiguous()?.to_device(&dev)?;
+            mm.forward(&row)?.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()
+        })
+        .collect::<Result<_>>()?;
+    for rows in 1..=22usize {
+        let x = all.narrow(0, 0, rows)?.contiguous()?;
+        let want = x.matmul(&deq.t()?)?;
+        let got = mm.forward(&x.to_device(&dev)?)?.to_device(&Device::Cpu)?;
+        assert_eq!(got.dims(), &[rows, n]);
+        let diff = (&got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(diff < 2e-3, "rows {rows}: diff {diff}");
+        // The row count must not change a row: speculative decoding relies on it.
+        if rows <= 20 {
+            for (r, one) in single.iter().enumerate().take(rows) {
+                let row = got.narrow(0, r, 1)?.flatten_all()?.to_vec1::<f32>()?;
+                assert_eq!(&row, one, "rows {rows}: row {r} differs from the same row read alone");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn quantized_dequantize_and_matmul() -> Result<()> {
     let dev = rocm();
     let types = [
